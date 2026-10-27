@@ -1,0 +1,9 @@
+rate,condition,run,processed_frames,ok_frames,recently_lost_frames,lost_frames,lost_source_ms,lost_intervals,map_ids,keyframes_created,queue_dropped,queue_max_depth,track_calls,track_total_median_ms,track_total_p95_ms,input_wait_p95_ms,local_mapping_tasks,local_mapping_wait_median_ms,local_mapping_wait_p95_ms,local_mapping_queue_depth_p95,lk_attempts,lk_accepted,lk_local_map_passes
+1x,baseline,run01,775,706,69,0,3000.684,1,0;1,231,56,32,776,34.9765,51.823,1512.7702,233,23.411,186.091,2.0,0,0,0
+1x,baseline,run02,793,717,76,0,3032.623,1,0;1,236,38,32,794,34.4571,45.7239,1396.0677,238,17.6279,134.4697,2.0,0,0,0
+1x,baseline,run03,804,726,78,0,3032.715,1,0;1,229,27,32,805,34.3106,44.4872,1372.5379,231,19.1615,127.6986,2.0,0,0,0
+1x,lk_retry,run01,774,702,72,0,3036.808,1,0;1,222,57,32,775,34.6972,49.6101,1527.1979,224,20.1347,168.3498,2.0,2,1,1
+1x,lk_retry,run02,766,693,73,0,3032.689,1,0;1,231,65,32,767,34.9061,49.6726,1575.9707,233,17.2438,159.6823,2.0,1,1,1
+1x,lk_retry,run03,782,708,74,0,3032.68,1,0;1,238,49,32,783,33.7358,49.0303,1541.5941,240,21.8847,170.3623,2.0,2,1,1
+0.25x,baseline,run01,831,741,90,0,3001.079,1,0;1,228,0,1,832,43.9112,55.2329,0.2912,230,22.2489,78.9977,0.0,0,0,0
+0.25x,lk_retry,run01,831,741,90,0,3001.079,1,0;1,233,0,1,832,43.1664,56.0638,0.299,235,22.1355,101.2012,0.0,0,0,0

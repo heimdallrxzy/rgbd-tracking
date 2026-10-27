@@ -1,0 +1,197 @@
+--- a/src/Jetson-ORB-SLAM3/src/Frame.cc
++++ b/src/Jetson-ORB-SLAM3/src/Frame.cc
+@@ -69,6 +69,7 @@
+      mpCamera(frame.mpCamera), mpCamera2(frame.mpCamera2), Nleft(frame.Nleft), Nright(frame.Nright),
+      monoLeft(frame.monoLeft), monoRight(frame.monoRight), mvLeftToRightMatch(frame.mvLeftToRightMatch),
+      mvRightToLeftMatch(frame.mvRightToLeftMatch), mvStereo3Dpoints(frame.mvStereo3Dpoints),
++     mImGray(frame.mImGray),
+      mTlr(frame.mTlr), mRlr(frame.mRlr), mtlr(frame.mtlr), mTrl(frame.mTrl),
+      mTcw(frame.mTcw), mbHasPose(false), mbHasVelocity(false)
+ {
+--- a/src/Jetson-ORB-SLAM3/src/Tracking.cc
++++ b/src/Jetson-ORB-SLAM3/src/Tracking.cc
+@@ -37,6 +37,8 @@
+ #include <limits>
+ #include <cstdlib>
+ #include <algorithm>
++#include <set>
++#include <opencv2/video/tracking.hpp>
+ 
+ #include <mutex>
+ #include <chrono>
+@@ -3029,6 +3031,8 @@
+ 
+     if(nmatches<20)
+     {
++        if (RetryMotionTrackingWithOpticalFlow())
++            return true;
+         Verbose::PrintMess("Not enough matches!!", Verbose::VERBOSITY_NORMAL);
+         if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
+             return true;
+@@ -3071,10 +3075,156 @@
+         return nmatches>20;
+     }
+ 
++    if (nmatchesMap < 10 && RetryMotionTrackingWithOpticalFlow())
++        return true;
++
+     if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
+         return true;
+     else
+         return nmatchesMap>=10;
++}
++
++bool Tracking::RetryMotionTrackingWithOpticalFlow()
++{
++    const char *enabled = std::getenv("ORB_SLAM3_OPTICAL_FLOW_RETRY");
++    if (!enabled || std::string(enabled) != "1" || mSensor != System::RGBD ||
++        mbOnlyTracking || mLastFrame.mImGray.empty() || mCurrentFrame.mImGray.empty() ||
++        mLastFrame.mImGray.size() != mCurrentFrame.mImGray.size() || mLastFrame.N <= 0 ||
++        mLastFrame.mvKeys.size() != mLastFrame.mvpMapPoints.size())
++        return false;
++
++    const Frame frameBeforeRetry(mCurrentFrame);
++    std::vector<cv::Point2f> previousPoints;
++    std::vector<MapPoint *> previousMapPoints;
++    std::set<MapPoint *> uniqueMapPoints;
++    previousPoints.reserve(mLastFrame.mvpMapPoints.size());
++    previousMapPoints.reserve(mLastFrame.mvpMapPoints.size());
++
++    for (int i = 0; i < mLastFrame.N; ++i)
++    {
++        MapPoint *point = mLastFrame.mvpMapPoints[i];
++        if (!point || point->isBad() || point->Observations() <= 0 ||
++            !uniqueMapPoints.insert(point).second)
++            continue;
++        previousPoints.push_back(mLastFrame.mvKeys[i].pt);
++        previousMapPoints.push_back(point);
++    }
++    if (previousPoints.size() < 20)
++        return false;
++
++    std::vector<cv::Point2f> currentPoints;
++    std::vector<cv::Point2f> backwardPoints;
++    std::vector<unsigned char> forwardStatus, backwardStatus;
++    try
++    {
++        cv::calcOpticalFlowPyrLK(mLastFrame.mImGray, mCurrentFrame.mImGray,
++            previousPoints, currentPoints, forwardStatus, cv::noArray(), cv::Size(21, 21), 3,
++            cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, 30, 0.01));
++        cv::calcOpticalFlowPyrLK(mCurrentFrame.mImGray, mLastFrame.mImGray,
++            currentPoints, backwardPoints, backwardStatus, cv::noArray(), cv::Size(21, 21), 3,
++            cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, 30, 0.01));
++    }
++    catch (const cv::Exception &)
++    {
++        return false;
++    }
++
++    struct Association
++    {
++        float distanceSquared;
++        int featureIndex;
++        MapPoint *mapPoint;
++    };
++    std::vector<Association> associations;
++    associations.reserve(previousPoints.size());
++    const float maximumDistanceSquared = 16.0f;
++    const int trackCount = static_cast<int>(std::min(currentPoints.size(),
++        std::min(forwardStatus.size(), std::min(backwardPoints.size(), backwardStatus.size()))));
++
++    for (int i = 0; i < trackCount; ++i)
++    {
++        if (!forwardStatus[i] || !backwardStatus[i] ||
++            !std::isfinite(currentPoints[i].x) || !std::isfinite(currentPoints[i].y) ||
++            cv::norm(previousPoints[i] - backwardPoints[i]) > 1.5 ||
++            currentPoints[i].x < 2.0f || currentPoints[i].y < 2.0f ||
++            currentPoints[i].x >= mCurrentFrame.mImGray.cols - 2.0f ||
++            currentPoints[i].y >= mCurrentFrame.mImGray.rows - 2.0f)
++            continue;
++
++        int bestFeature = -1;
++        float bestDistanceSquared = maximumDistanceSquared;
++        for (int j = 0; j < mCurrentFrame.N; ++j)
++        {
++            const cv::Point2f delta = mCurrentFrame.mvKeys[j].pt - currentPoints[i];
++            const float distanceSquared = delta.dot(delta);
++            if (distanceSquared < bestDistanceSquared)
++            {
++                bestDistanceSquared = distanceSquared;
++                bestFeature = j;
++            }
++        }
++        if (bestFeature >= 0)
++            associations.push_back({bestDistanceSquared, bestFeature, previousMapPoints[i]});
++    }
++
++    std::sort(associations.begin(), associations.end(),
++        [](const Association &left, const Association &right)
++        {
++            return left.distanceSquared < right.distanceSquared;
++        });
++    std::vector<bool> usedFeatures(mCurrentFrame.N, false);
++    std::set<MapPoint *> usedMapPoints;
++    int uniqueAssociations = 0;
++    for (const Association &association : associations)
++    {
++        if (usedFeatures[association.featureIndex] ||
++            !usedMapPoints.insert(association.mapPoint).second)
++            continue;
++        usedFeatures[association.featureIndex] = true;
++        ++uniqueAssociations;
++    }
++    if (uniqueAssociations < 20)
++        return false;
++
++    std::fill(mCurrentFrame.mvpMapPoints.begin(), mCurrentFrame.mvpMapPoints.end(), nullptr);
++    std::fill(mCurrentFrame.mvbOutlier.begin(), mCurrentFrame.mvbOutlier.end(), false);
++    std::fill(usedFeatures.begin(), usedFeatures.end(), false);
++    usedMapPoints.clear();
++    for (const Association &association : associations)
++    {
++        if (usedFeatures[association.featureIndex] ||
++            !usedMapPoints.insert(association.mapPoint).second)
++            continue;
++        usedFeatures[association.featureIndex] = true;
++        mCurrentFrame.mvpMapPoints[association.featureIndex] = association.mapPoint;
++    }
++
++    mCurrentFrame.SetPose(mVelocity * mLastFrame.GetPose());
++    Optimizer::PoseOptimization(&mCurrentFrame);
++
++    int inliers = 0;
++    for (int i = 0; i < mCurrentFrame.N; ++i)
++    {
++        MapPoint *point = mCurrentFrame.mvpMapPoints[i];
++        if (!point)
++            continue;
++        if (mCurrentFrame.mvbOutlier[i] || point->isBad() || point->Observations() <= 0)
++        {
++            mCurrentFrame.mvpMapPoints[i] = nullptr;
++            mCurrentFrame.mvbOutlier[i] = false;
++        }
++        else
++        {
++            ++inliers;
++        }
++    }
++
++    if (inliers < 10 || !mCurrentFrame.GetPose().matrix().allFinite())
++    {
++        mCurrentFrame = frameBeforeRetry;
++        return false;
++    }
++    return true;
+ }
+ 
+ bool Tracking::TrackLocalMap()
+--- a/src/Jetson-ORB-SLAM3/include/Tracking.h
++++ b/src/Jetson-ORB-SLAM3/include/Tracking.h
+@@ -235,6 +235,7 @@
+     bool TrackReferenceKeyFrame();
+     void UpdateLastFrame();
+     bool TrackWithMotionModel();
++    bool RetryMotionTrackingWithOpticalFlow();
+     bool PredictStateIMU();
+ 
+     bool Relocalization();

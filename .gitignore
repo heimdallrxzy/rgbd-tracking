@@ -1,0 +1,12 @@
+*.bag
+*.db3
+*.mcap
+build/
+install/
+log/
+output/
+rosbag2/
+trajectory_*.txt
+slam.log
+bag.log
+__pycache__/
